@@ -2527,6 +2527,16 @@ fn is_ip_blocked(ip: std::net::IpAddr) -> bool {
     }
 }
 
+/// Whether `parsed` is a `127.0.0.1` URL on a port in the comma separated list `open`.
+fn opened_loopback(parsed: &url::Url, open: Option<&str>) -> bool {
+    match (parsed.host(), parsed.port(), open) {
+        (Some(url::Host::Ipv4(v4)), Some(port), Some(open)) => {
+            v4.is_loopback() && open.split(',').any(|p| p.trim().parse() == Ok(port))
+        }
+        _ => false,
+    }
+}
+
 /// Check a URL for blocked schemes, hostnames, and IP literals.
 /// Does NOT resolve DNS — use `SafeResolver` on the reqwest client for
 /// connect-time DNS filtering.
@@ -2549,6 +2559,15 @@ pub fn check_url_safe(url: &str) -> io::Result<()> {
             format!("access denied: cannot parse host from {url}"),
         )
     })?;
+    // The operator of `box run` can open one `127.0.0.1` port, for a demo service.
+    if opened_loopback(
+        &parsed,
+        std::env::var("STRANDS_SHELL_ALLOW_LOOPBACK_PORT")
+            .ok()
+            .as_deref(),
+    ) {
+        return Ok(());
+    }
     match parsed.host() {
         Some(url::Host::Ipv4(v4)) => {
             if is_ip_blocked(std::net::IpAddr::V4(v4)) {
@@ -2614,7 +2633,7 @@ impl reqwest::dns::Resolve for SafeResolver {
 
 #[cfg(test)]
 mod url_safety_tests {
-    use super::check_url_safe;
+    use super::{check_url_safe, opened_loopback};
 
     // A1: IPv6 literals (incl. IPv4-mapped IMDS) must be blocked by
     // `check_url_safe` ITSELF — not merely by the SafeResolver/connection
@@ -2650,6 +2669,45 @@ mod url_safety_tests {
         ] {
             assert!(check_url_safe(u).is_err(), "{u} should be blocked");
         }
+    }
+
+    #[test]
+    fn opened_loopback_ports_are_the_only_exception() {
+        let url = |s: &str| url::Url::parse(s).unwrap();
+        assert!(opened_loopback(
+            &url("http://127.0.0.1:8126/x"),
+            Some("8126")
+        ));
+        assert!(opened_loopback(
+            &url("http://127.0.0.1:8127/x"),
+            Some("8126,8127")
+        ));
+        assert!(opened_loopback(
+            &url("http://127.0.0.1:8127/x"),
+            Some("8126, 8127")
+        ));
+        assert!(!opened_loopback(
+            &url("http://127.0.0.1:8128/x"),
+            Some("8126,8127")
+        ));
+        assert!(!opened_loopback(
+            &url("http://127.0.0.1:8127/x"),
+            Some("8126")
+        ));
+        assert!(!opened_loopback(&url("http://127.0.0.1/x"), Some("8126")));
+        assert!(!opened_loopback(&url("http://127.0.0.1:8126/x"), None));
+        assert!(!opened_loopback(
+            &url("http://127.0.0.1:8126/x"),
+            Some("not a port")
+        ));
+        assert!(!opened_loopback(
+            &url("http://10.0.0.1:8126/x"),
+            Some("8126")
+        ));
+        assert!(!opened_loopback(
+            &url("http://localhost:8126/x"),
+            Some("8126")
+        ));
     }
 
     // Userinfo must not disguise the real host. `http://public.example@IMDS/` is a
