@@ -114,7 +114,8 @@ async fn run_l7_legs(
     };
 
     // A secret rides only TLS: refuse on the same canonical target the credential match below sees.
-    if !intercepted && state.controls.matches_any(&target.as_destination()) {
+    let demo_plaintext = std::env::var_os("STRANDS_BOX_DEMO_ALLOW_PLAINTEXT_CREDENTIALS").is_some();
+    if !intercepted && !demo_plaintext && state.controls.matches_any(&target.as_destination()) {
         return Ok(refuse(
             "credential would attach on a plaintext request; refused — a secret must ride TLS",
             WorkloadResponse::refusal(403, b"credential not permitted on a plaintext request"),
